@@ -3,19 +3,20 @@ import json
 import pandas as pd
 import requests
 import logging
-
 from dotenv import load_dotenv
 from pathlib import Path
 from google.cloud import bigquery
 
-# Cargar las variables del archivo .env
+from utils import get_items_data
+
 load_dotenv()
+MELI_API_KEY = os.getenv("MELI_API_KEY")
 
 here = Path(__file__).parent
 
+logging.basicConfig(level=logging.INFO)
 
 def read_json(config_path: Path) -> dict:
-    """Lee un archivo de configuración JSON."""
     with open(config_path, "r") as file:
         config = json.load(file)
     return config
@@ -47,21 +48,20 @@ class DataBase:
 
     def item_schema(self) -> list[bigquery.SchemaField]:
         return [    
-            bigquery.SchemaField("id", "STRING"),
-            bigquery.SchemaField("site_id", "STRING"),
-            bigquery.SchemaField("title", "STRING"),
-            bigquery.SchemaField("currency_id", "STRING"),
-            bigquery.SchemaField("seller_id", "STRING"),
             bigquery.SchemaField("category_id", "STRING"),
-            bigquery.SchemaField("price", "FLOAT"),
-            bigquery.SchemaField("sale_terms", "STRING"),
-            bigquery.SchemaField("warrancy", "STRING"),
-            bigquery.SchemaField("shipping", "STRING"),
+            bigquery.SchemaField("price", "INTEGER"),
+            bigquery.SchemaField("seller_id", "INTEGER"),
+            bigquery.SchemaField("title", "STRING"),
+            bigquery.SchemaField("free_shipping", "BOOL"),
+            bigquery.SchemaField("local_pick_up", "BOOL"),
+            bigquery.SchemaField("logistic_type", "STRING"),
+            bigquery.SchemaField("shipping_mode", "STRING"),
+            bigquery.SchemaField("warranty_time", "STRING"),
+            bigquery.SchemaField("warranty_type", "STRING")
         ]
-
-
+    
     def _create_bigquery_client(self) -> bigquery.Client:
-        # creacion de cliente en bigquery
+
         self._set_gcp_credentials()
         max_retries = 3
         for attempt in range(max_retries + 1):
@@ -76,8 +76,8 @@ class DataBase:
                 
         return client
 
+
     def create_table_if_not_exists(self, schema, table_name: str):
-        #verificar si la tabla existe
         try:
             self.client.get_table(table_name)
             print(f"The table {table_name} alraedy exists.")
@@ -86,9 +86,10 @@ class DataBase:
             self.client.create_table(table)
             print(f"The table {table_name} has been created.")
 
+
     def upload_dataframe_to_bigquery(self, df: pd.DataFrame, table_name:str):
         job = self.client.load_table_from_dataframe(df, table_name)
-        job.result()  # Esperar a que el job termine
+        job.result() 
         logging.info(f"Data uploaded to BigQuery in the table {table_name}.")
 
 
@@ -115,11 +116,8 @@ class Product:
         endpoint = f"/currency_conversions/search?from={self.from_currency}&to={self.to_currency}"
 
         url = f"{self.host}{endpoint}"
-
         print(url)
-
         response = requests.get(url, headers={"Authorization": os.getenv("MELI_API_KEY")})
-        
         if response.status_code == 200:
             data = response.json()
             extracted_data = {
@@ -133,48 +131,57 @@ class Product:
             return None
 
     def fetch_product(self) -> str | None:
-
         endpoint = f"/sites/{self.site_id}/search?q={self.product_name}&condition={self.product_condition}"
 
         url = f"{self.host}{endpoint}"
-
-        response = requests.get(url, headers={"Authorization": os.getenv("MELI_API_KEY")})
+        response = requests.get(url, headers={"Authorization": MELI_API_KEY})
         
         if response.status_code == 200:
             data = response.json()
             ids = ",".join([product["id"] for product in data["results"]])
-            print(ids)
             return ids
         else:
             logging.error(f"Error fetching data: {response.status_code}")
-            return None
-        
-    def fetch_item(self: str) -> dict | None:
-        
-        ids = self.fetch_product()
+            return 
 
-        endpoint = f"/items?ids={ids}&attributes={self.items_atributes}"
-        url = f"{self.host}{endpoint}"
+    def chunk_ids(self, ids_str:str, chunk_size:int=20):
+
+        ids_list = ids_str.split(',')
         
-        response = requests.get(url, headers={"Authorization": os.getenv("MELI_API_KEY")})
-        if response.status_code == 200:
+        for i in range(0, len(ids_list), chunk_size):
+            yield ids_list[i:i + chunk_size]  
+
+    def fetch_items(self) -> dict | None:
+        ids = self.fetch_product()  
+        if not ids:
+            logging.error("No IDs found")
+            return None
+
+        all_items_data = []
+
+        for id_chunk in self.chunk_ids(ids, 20):  
+            id_items = ",".join(id_chunk)  
+            endpoint = f"/items?ids={id_items}&attributes={self.items_atributes}"
+            
+            url = f"{self.host}{endpoint}"
+
+            logging.info(f"Fetching data from {url}")
+
+            response = requests.get(url, headers={"Authorization": MELI_API_KEY})
+
+            if response.status_code != 200:
+                return None
+            
             data = response.json()
 
-            data = {
-                "id": data.get("id"),
-                "site_id": data.get("site_id"),
-                "title": data.get("title"),
-                "currency_id": data.get("currency_id"),
-                "seller_id": data.get("seller_id"),
-                "category_id": data.get("category_id"),
-                "price": data.get("price"),
-                "sale_terms": data.get("sale_terms"),
-                "warranty": data.get("warranty"),
-                "shipping": data.get("shipping")
-            }
+            if response.status_code == 200:
+                data = response.json()
 
-            return data
+                items = get_items_data(data)
 
+                all_items_data.extend(items)
+
+        return all_items_data
 
 def main():
     """
@@ -199,15 +206,11 @@ def main():
 
     pruduct = Product()
     currencies_data = pruduct.fetch_currency_conversion()
-    items_data = pruduct.fetch_item()
-
-
-    print(currencies_data)
-    print(items_data)
+    items_data = pruduct.fetch_items()
 
     currencies_dataframe = pd.DataFrame([currencies_data])
-    items_dataframe = pd.DataFrame([items_data])
-    print(items_dataframe.head(10)) 
+    items_dataframe = pd.DataFrame(items_data)
+
     
     database = DataBase()
     currency_table = f"{database.dataset_id}.{database.tables['currencies']}"

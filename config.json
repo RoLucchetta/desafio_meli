@@ -6,12 +6,12 @@
     "product_condition": "new",
     "limit": 200,
     "host": "https://api.mercadolibre.com",
-    "items_attributes": "id,site_id,title,currency_id,seller_id,category_id,price,sale_terms,warrancy,shipping",
+    "items_attributes": "id,site_id,title,currency_id,seller_id,category_id,price,warrancy,shipping",
     "database": {
         "dataset_id": "desafio-meli-446617.ml_challenge",
         "tables": {
-            "currencies":"currency_conversions",
-            "items":"items_details"
+            "currencies": "currency_conversions",
+            "items": "items_details"
         }
     }
 }
